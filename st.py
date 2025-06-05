@@ -29,7 +29,7 @@ class Settings:
     Melt = bool('')
     UacBypass = bool('')
     ArchivePassword = base64.b64decode('ZGV2amVi').decode()
-    HideConsole = bool('true')
+    HideConsole = bool('false')
     Debug = bool('')
     RunBoundOnStartup = bool('')
     CaptureWebcam = bool('')
